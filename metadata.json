@@ -1,0 +1,6 @@
+{
+  "name": "Reddit Scraper Test App",
+  "description": "A very small full-stack test app to verify Reddit JSON scraping works reliably for video posts.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
