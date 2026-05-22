@@ -4,6 +4,7 @@ export interface RedditClip {
   upvotes: number;
   thumbnail: string;
   videoUrl: string;
+  dashUrl?: string;
   permalink: string;
   timestamp: number;
 }

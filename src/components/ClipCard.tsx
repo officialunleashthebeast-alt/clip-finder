@@ -50,7 +50,9 @@ export default function ClipCard({ clip, index, isPlaying, onPlay, onPause }: Cl
   const handleDownload = async (e: React.MouseEvent) => {
     e.preventDefault();
     try {
-      const downloadUrl = `/api/download?url=${encodeURIComponent(clip.videoUrl)}`;
+      setDownloadState("fetching");
+      const dashParam = clip.dashUrl ? `&dashUrl=${encodeURIComponent(clip.dashUrl)}` : "";
+      const downloadUrl = `/api/download?url=${encodeURIComponent(clip.videoUrl)}&title=${encodeURIComponent(clip.title)}${dashParam}`;
       
       // Trigger standard browser native download pipeline directly
       const helperLink = document.createElement("a");

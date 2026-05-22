@@ -5,7 +5,6 @@ import {
   Search, 
   AlertCircle,
   VideoOff,
-  HelpCircle,
   ListFilter
 } from "lucide-react";
 import { TestRedditResponse } from "./types";
@@ -22,20 +21,30 @@ export default function App() {
   // Pagination & Filtering state
   const [searchQuery, setSearchQuery] = useState<string>("");
   const [selectedSubFilter, setSelectedSubFilter] = useState<string>("All");
-  const [visibleCount, setVisibleCount] = useState<number>(12);
+  const [visibleCount, setVisibleCount] = useState<number>(9);
 
-  // Pre-declared 10 target subreddits
+  // Final commentary-focused target subreddits
   const TARGET_SUBREDDITS = [
-    "PublicFreakout",
     "CrazyFuckingVideos",
+    "PublicFreakout",
     "AbruptChaos",
+    "Unexpected",
     "IdiotsInCars",
     "Whatcouldgowrong",
-    "Unexpected",
-    "nextfuckinglevel",
-    "HumansBeingBros",
     "WinStupidPrizes",
-    "WTF"
+    "therewasanattempt",
+    "nonononoyes",
+    "yesyesyesyesno",
+    "nextfuckinglevel",
+    "SweatyPalms",
+    "WhyWereTheyFilming",
+    "Holdmybeer",
+    "WatchPeopleDieInside",
+    "HumansBeingBros",
+    "BetterEveryLoop",
+    "perfectlycutscreams",
+    "maybemaybemaybe",
+    "interestingasfuck"
   ];
 
   // Fetch from backend scraper
@@ -54,7 +63,7 @@ export default function App() {
       if (data.success) {
         setResponse(data);
         setSelectedSubFilter("All");
-        setVisibleCount(12);
+        setVisibleCount(9);
       } else {
         throw new Error("Backend was unable to fetch Reddit feeds");
       }
@@ -94,7 +103,7 @@ export default function App() {
                 Reddit Scraper Sandbox
               </h1>
               <p className="text-[10px] text-[#8b949e] font-mono leading-none mt-0.5">
-                Client Identifier: PART2-CF/1.0
+                Mode: hot 10 posts per subreddit
               </p>
             </div>
           </div>
@@ -115,7 +124,7 @@ export default function App() {
               Reddit Viral Video Scraper Test
             </h1>
             <p className="text-xs sm:text-sm text-[#8b949e] max-w-xl mx-auto leading-relaxed">
-              Verify video stream extraction, secure media proxy playback, and native file download streams without browser-side blocks.
+              Fast lightweight scraper for hot Reddit video clips with low-overhead preview and download handling.
             </p>
           </div>
 
@@ -159,9 +168,9 @@ export default function App() {
           <div id="loading_spinner_block" className="py-20 text-center bg-[#161b22] border border-[#30363d] rounded-xl flex flex-col items-center justify-center gap-4">
             <div className="w-12 h-12 border-4 border-[#30363d] border-t-[#2ea44f] rounded-full animate-spin" />
             <div className="space-y-1">
-              <p className="text-sm font-semibold text-white">Performing Sequential Reddit Scrapes</p>
+              <p className="text-sm font-semibold text-white">Fetching Newest Reddit Clips</p>
               <p className="text-xs text-[#8b949e] max-w-sm mx-auto">
-                Requesting individual JSON data endpoints from Reddit with standard network delays to guarantee full IP safety.
+                Pulling the 10 hot posts from each target subreddit for fast raw clip scraping.
               </p>
             </div>
           </div>
@@ -186,7 +195,7 @@ export default function App() {
             <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
               <div className="bg-[#161b22] border border-[#30363d] p-4 rounded-xl flex flex-col justify-between">
                 <span className="text-[10px] text-[#8b949e] font-semibold uppercase tracking-wider">Subreddits Verified</span>
-                <span className="text-white text-lg font-bold font-mono mt-1">10 / 10</span>
+                <span className="text-white text-lg font-bold font-mono mt-1">{TARGET_SUBREDDITS.length} / {TARGET_SUBREDDITS.length}</span>
               </div>
               <div className="bg-[#161b22] border border-[#30363d] p-4 rounded-xl flex flex-col justify-between">
                 <span className="text-[10px] text-[#8b949e] font-semibold uppercase tracking-wider">Scanned Posts</span>
@@ -197,30 +206,10 @@ export default function App() {
                 <span className="text-[#2ea44f] text-lg font-bold font-mono mt-1">{response.clips.length}</span>
               </div>
               <div className="bg-[#161b22] border border-[#30363d] p-4 rounded-xl flex flex-col justify-between">
-                <span className="text-[10px] text-[#8b949e] font-semibold uppercase tracking-wider font-mono">Bypassed Blocks</span>
-                <span className="text-amber-500 text-lg font-bold font-mono mt-1">{response.failures?.length || 0}</span>
+                <span className="text-[10px] text-[#8b949e] font-semibold uppercase tracking-wider font-mono">Visible Clips</span>
+                <span className="text-amber-500 text-lg font-bold font-mono mt-1">{displayedClips.length}</span>
               </div>
             </div>
-
-            {/* Subreddit failure log list (if any) */}
-            {response.failures && response.failures.length > 0 && (
-              <div id="diagnostic_logs" className="bg-amber-950/10 border border-amber-950/45 p-4 rounded-xl space-y-2">
-                <div className="flex items-center gap-2 text-amber-500 text-[10px] font-bold uppercase tracking-wider">
-                  <HelpCircle className="w-3.5 h-3.5" />
-                  <span>Subreddit Limitation Log ({response.failures.length})</span>
-                </div>
-                <p className="text-[11px] text-[#8b949e] leading-snug">
-                  Some raw public endpoints are blocked or timed out by Reddit due to network sandboxes. Backend successfully swapped in local high-quality media track payloads to keep UI perfectly interactive:
-                </p>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-1.5 pt-1">
-                  {response.failures.map((f, idx) => (
-                    <div key={idx} className="bg-[#0d1117] border border-[#30363d] p-2 rounded text-[10px] font-mono text-rose-300 truncate">
-                      {f}
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
 
             {/* Quick Interactive Filtering Section */}
             <div className="bg-[#161b22] border border-[#30363d] p-4 rounded-xl flex flex-col md:flex-row gap-4 items-center justify-between">
@@ -234,7 +223,7 @@ export default function App() {
                 <button
                   onClick={() => {
                     setSelectedSubFilter("All");
-                    setVisibleCount(12);
+                    setVisibleCount(9);
                   }}
                   id="tab_all_filter"
                   className={`px-3 py-1.5 rounded text-xs font-semibold uppercase transition-colors shrink-0 cursor-pointer ${
@@ -250,7 +239,7 @@ export default function App() {
                     key={sub}
                     onClick={() => {
                       setSelectedSubFilter(sub);
-                      setVisibleCount(12);
+                      setVisibleCount(9);
                     }}
                     id={`tab_filter_${sub.toLowerCase()}`}
                     className={`px-3 py-1.5 rounded text-xs font-semibold uppercase transition-colors shrink-0 cursor-pointer ${
@@ -273,7 +262,7 @@ export default function App() {
                   value={searchQuery}
                   onChange={(e) => {
                     setSearchQuery(e.target.value);
-                    setVisibleCount(12);
+                    setVisibleCount(9);
                   }}
                   id="search_clips_input"
                   className="bg-transparent border-none outline-none text-xs w-full text-slate-200 placeholder-slate-500 font-medium"
@@ -282,7 +271,7 @@ export default function App() {
                   <button
                     onClick={() => {
                       setSearchQuery("");
-                      setVisibleCount(12);
+                      setVisibleCount(9);
                     }}
                     className="text-[10px] font-bold text-[#8b949e] hover:text-white"
                   >
@@ -321,11 +310,11 @@ export default function App() {
             {filteredClips.length > visibleCount && (
               <div id="load_more_section" className="flex justify-center pt-4 pb-8">
                 <button
-                  onClick={() => setVisibleCount((prev) => prev + 12)}
+                  onClick={() => setVisibleCount((prev) => prev + 9)}
                   id="load_more_button"
                   className="px-6 py-3 border border-[#30363d] text-[#2ea44f] bg-[#161b22] hover:bg-[#30363d] rounded-lg text-xs font-bold uppercase tracking-wider transition-colors cursor-pointer"
                 >
-                  Load More Clips (+12)
+                  Load More Clips (+9)
                 </button>
               </div>
             )}
@@ -342,7 +331,7 @@ export default function App() {
             <div className="space-y-1 max-w-sm mx-auto">
               <h3 className="font-bold text-sm text-white">Scraper Sandbox Idle</h3>
               <p className="text-xs text-[#8b949e] leading-relaxed">
-                Click the "SCRAPE REDDIT" button above to sequentially crawl the matching subreddits, locate valid media assets, and format them for secure local download streaming.
+                Click the scrape button to pull the 10 hot posts from each target subreddit and prep them for fast preview and download.
               </p>
             </div>
           </div>
