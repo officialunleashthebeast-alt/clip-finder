@@ -172,12 +172,22 @@ async function startServer() {
       let muxedWithDashManifest = false;
       if (requestedDashUrl) {
         try {
-          await muxVideoFromDashManifest({
-            dashUrl: requestedDashUrl,
-            outputPath,
-            title
-          });
-          muxedWithDashManifest = true;
+          const dashStreams = await resolveHighestQualityDashStreams(requestedDashUrl);
+          if (dashStreams.videoUrl) {
+            await downloadRemoteFile(dashStreams.videoUrl, videoInputPath);
+
+            if (dashStreams.audioUrl) {
+              await downloadRemoteFile(dashStreams.audioUrl, audioInputPath);
+            }
+
+            await muxVideoForDownload({
+              videoInputPath,
+              audioInputPath: dashStreams.audioUrl ? audioInputPath : null,
+              outputPath,
+              title
+            });
+            muxedWithDashManifest = true;
+          }
         } catch (err: any) {
           console.warn(`[BACKEND DOWNLOAD] Dash manifest mux failed, falling back to direct media download: ${err?.message || String(err)}`);
         }
@@ -739,6 +749,88 @@ async function muxVideoFromDashManifest({
   ];
 
   await execFileAsync("ffmpeg", args, { windowsHide: true });
+}
+
+async function resolveHighestQualityDashStreams(dashUrl: string) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 15000);
+
+  try {
+    const response = await fetch(dashUrl, {
+      headers: getStandardFetchHeaders(),
+      signal: controller.signal
+    });
+
+    if (!response.ok) {
+      throw new Error(`Dash manifest request failed: ${response.status}`);
+    }
+
+    const manifest = await response.text();
+    const manifestUrl = new URL(dashUrl);
+    const representations = parseDashRepresentations(manifest, manifestUrl);
+
+    const videoRepresentation = representations
+      .filter((item) => item.kind === "video")
+      .sort((a, b) => b.score - a.score)[0];
+    const audioRepresentation = representations
+      .filter((item) => item.kind === "audio")
+      .sort((a, b) => b.score - a.score)[0];
+
+    return {
+      videoUrl: videoRepresentation?.url || "",
+      audioUrl: audioRepresentation?.url || ""
+    };
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+function parseDashRepresentations(manifest: string, manifestUrl: URL) {
+  const adaptationMatches = Array.from(
+    manifest.matchAll(/<AdaptationSet\b([\s\S]*?)>([\s\S]*?)<\/AdaptationSet>/gi)
+  );
+
+  return adaptationMatches.flatMap(([, adaptationAttrs, adaptationBody]) => {
+    const adaptationMimeType = getXmlAttribute(adaptationAttrs, "mimeType");
+    const contentType = getXmlAttribute(adaptationAttrs, "contentType");
+    const kind = adaptationMimeType?.startsWith("audio") || contentType === "audio"
+      ? "audio"
+      : adaptationMimeType?.startsWith("video") || contentType === "video"
+      ? "video"
+      : null;
+
+    if (!kind) {
+      return [];
+    }
+
+    const representationMatches = Array.from(
+      adaptationBody.matchAll(/<Representation\b([\s\S]*?)>([\s\S]*?)<\/Representation>/gi)
+    );
+
+    return representationMatches
+      .map(([, representationAttrs, representationBody]) => {
+        const baseUrlMatch = representationBody.match(/<BaseURL>([^<]+)<\/BaseURL>/i);
+        if (!baseUrlMatch?.[1]) {
+          return null;
+        }
+
+        const bandwidth = Number(getXmlAttribute(representationAttrs, "bandwidth") || "0");
+        const height = Number(getXmlAttribute(representationAttrs, "height") || "0");
+        const width = Number(getXmlAttribute(representationAttrs, "width") || "0");
+
+        return {
+          kind,
+          url: new URL(baseUrlMatch[1].trim(), manifestUrl).toString(),
+          score: bandwidth + height * 100000 + width * 100
+        };
+      })
+      .filter(Boolean) as Array<{ kind: "video" | "audio"; url: string; score: number }>;
+  });
+}
+
+function getXmlAttribute(fragment: string, attributeName: string) {
+  const match = fragment.match(new RegExp(`${attributeName}="([^"]+)"`, "i"));
+  return match?.[1] || "";
 }
 
 startServer();
