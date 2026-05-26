@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import { useState, type MouseEvent } from "react";
 import { 
   Play, 
   ArrowUp, 
@@ -47,7 +47,7 @@ export default function ClipCard({ clip, index, isPlaying, onPlay, onPause }: Cl
   };
 
   // Safe client-side proxy file download
-  const handleDownload = async (e: React.MouseEvent) => {
+  const handleDownload = async (    e: MouseEvent) => {
     e.preventDefault();
     try {
       setDownloadState("fetching");

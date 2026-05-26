@@ -6,10 +6,7 @@ import { finished } from "stream/promises";
 import { promises as fs, createReadStream, createWriteStream } from "fs";
 import os from "os";
 import crypto from "crypto";
-import { execFile } from "child_process";
-import { promisify } from "util";
-
-const execFileAsync = promisify(execFile);
+import { muxVideoForDownload, QUALITY_PRESETS } from "./src/ffmpeg.ts";
 const REDDIT_NAME = process.env.REDDIT_APP_NAME || "MyRedditVidsScraper";
 const POSTS_PER_SUBREDDIT = 10;
 const SCRAPE_TIMEOUT_MS = 3500;
@@ -180,11 +177,10 @@ async function startServer() {
               await downloadRemoteFile(dashStreams.audioUrl, audioInputPath);
             }
 
-            await muxVideoForDownload({
-              videoInputPath,
+            await muxVideoForDownload(videoInputPath, outputPath, {
               audioInputPath: dashStreams.audioUrl ? audioInputPath : null,
-              outputPath,
-              title
+              title,
+              quality: QUALITY_PRESETS.high,
             });
             muxedWithDashManifest = true;
           }
@@ -202,11 +198,10 @@ async function startServer() {
           await downloadRemoteFile(audioUrl, audioInputPath);
         }
 
-        await muxVideoForDownload({
-          videoInputPath,
+        await muxVideoForDownload(videoInputPath, outputPath, {
           audioInputPath: hasSeparateAudio ? audioInputPath : null,
-          outputPath,
-          title
+          title,
+          quality: QUALITY_PRESETS.high,
         });
       }
 
@@ -565,15 +560,13 @@ function sanitizeMetadataValue(value: string) {
   return value.replace(/[\u0000-\u001f\u007f]/g, "").trim();
 }
 
-function sanitizeFilenamePart(value: string) {
-  return sanitizeMetadataValue(value)
+function buildDownloadFilename(title: string) {
+  const safe = title
     .replace(/[<>:"/\\|?*\u0000-\u001f]/g, " ")
     .replace(/\s+/g, " ")
-    .trim();
-}
-
-function buildDownloadFilename(title: string) {
-  return "raw-video.mp4";
+    .trim()
+    .substring(0, 100);
+  return `${safe || "reddit-clip"}.mp4`;
 }
 
 async function cleanupDirectory(targetDir: string) {
@@ -677,79 +670,9 @@ async function findMatchingAudioUrl(videoUrl: string) {
   return null;
 }
 
-async function muxVideoForDownload({
-  videoInputPath,
-  audioInputPath,
-  outputPath,
-  title
-}: {
-  videoInputPath: string;
-  audioInputPath: string | null;
-  outputPath: string;
-  title: string;
-}) {
-  const args = [
-    "-y",
-    "-i",
-    videoInputPath
-  ];
-
-  if (audioInputPath) {
-    args.push("-i", audioInputPath);
-  }
-
-  args.push(
-    "-map", "0:v:0"
-  );
-
-  if (audioInputPath) {
-    args.push("-map", "1:a:0");
-  } else {
-    args.push("-map", "0:a?");
-  }
-
-  args.push(
-    "-c", "copy",
-    "-movflags", "+faststart",
-    "-metadata", `title=${title}`,
-    outputPath
-  );
-
-  await execFileAsync("ffmpeg", args, { windowsHide: true });
-}
-
-async function muxVideoFromDashManifest({
-  dashUrl,
-  outputPath,
-  title
-}: {
-  dashUrl: string;
-  outputPath: string;
-  title: string;
-}) {
-  const args = [
-    "-y",
-    "-user_agent",
-    `${REDDIT_NAME}/1.0`,
-    "-headers",
-    "Referer: https://www.reddit.com/\r\nAccept-Language: en-US,en;q=0.9\r\n",
-    "-i",
-    dashUrl,
-    "-map",
-    "0:v:0",
-    "-map",
-    "0:a:0?",
-    "-c",
-    "copy",
-    "-movflags",
-    "+faststart",
-    "-metadata",
-    `title=${title}`,
-    outputPath
-  ];
-
-  await execFileAsync("ffmpeg", args, { windowsHide: true });
-}
+// Moved to src/ffmpeg.ts:
+//   muxVideoForDownload()  - improved with encoding, filters, subs, audio mix
+//   muxVideoFromDashManifest() - improved with encoding options
 
 async function resolveHighestQualityDashStreams(dashUrl: string) {
   const controller = new AbortController();

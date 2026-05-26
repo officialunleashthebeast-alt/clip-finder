@@ -5,7 +5,8 @@ import {
   Search, 
   AlertCircle,
   VideoOff,
-  ListFilter
+  ListFilter,
+  ChevronRight
 } from "lucide-react";
 import { TestRedditResponse } from "./types";
 import ClipCard from "./components/ClipCard";
@@ -22,6 +23,7 @@ export default function App() {
   const [searchQuery, setSearchQuery] = useState<string>("");
   const [selectedSubFilter, setSelectedSubFilter] = useState<string>("All");
   const [visibleCount, setVisibleCount] = useState<number>(9);
+  const [sidebarOpen, setSidebarOpen] = useState<boolean>(false);
 
   // Final commentary-focused target subreddits
   const TARGET_SUBREDDITS = [
@@ -113,6 +115,78 @@ export default function App() {
           </div>
         </div>
       </header>
+
+      {/* Desktop Subreddit Sidebar - slides left/right */}
+      <div className="hidden lg:block">
+        <button
+          onClick={() => setSidebarOpen(!sidebarOpen)}
+          id="subreddit_sidebar_toggle"
+          className="fixed left-0 top-1/2 -translate-y-1/2 z-40 bg-[#161b22] border border-[#30363d] border-l-0 p-2 rounded-r-lg hover:bg-[#30363d] transition-all cursor-pointer"
+          title={sidebarOpen ? "Close sidebar" : "Open sidebar"}
+        >
+          <ChevronRight className={`w-4 h-4 text-[#8b949e] transition-transform duration-200 ${sidebarOpen ? 'rotate-180' : ''}`} />
+        </button>
+        <aside
+          className={`fixed left-0 top-0 h-full w-56 bg-[#161b22] border-r border-[#30363d] z-30 pt-20 transition-transform duration-300 ease-in-out ${
+            sidebarOpen ? 'translate-x-0' : '-translate-x-full'
+          }`}
+        >
+          <div className="p-4 overflow-y-auto h-full space-y-4">
+            <div>
+              <h3 className="text-[10px] font-bold uppercase tracking-wider text-[#8b949e] mb-2">
+                Target Subreddits
+              </h3>
+              <div className="space-y-0.5">
+                <button
+                  onClick={() => { setSelectedSubFilter("All"); setVisibleCount(9); }}
+                  className={`w-full text-left px-3 py-2 rounded text-xs font-semibold transition-colors cursor-pointer ${
+                    selectedSubFilter === "All"
+                      ? "bg-[#2ea44f] text-[#0d1117]"
+                      : "text-[#8b949e] hover:text-white hover:bg-[#30363d]"
+                  }`}
+                >
+                  All
+                </button>
+                {TARGET_SUBREDDITS.map((sub) => (
+                  <button
+                    key={sub}
+                    onClick={() => { setSelectedSubFilter(sub); setVisibleCount(9); }}
+                    className={`w-full text-left px-3 py-2 rounded text-xs font-semibold transition-colors cursor-pointer ${
+                      selectedSubFilter === sub
+                        ? "bg-[#2ea44f] text-[#0d1117]"
+                        : "text-[#8b949e] hover:text-white hover:bg-[#30363d]"
+                    }`}
+                  >
+                    r/{sub}
+                  </button>
+                ))}
+              </div>
+            </div>
+            {response && returnedSubreddits.length > 0 && (
+              <div>
+                <h3 className="text-[10px] font-bold uppercase tracking-wider text-[#8b949e] mb-2">
+                  Found
+                </h3>
+                <div className="space-y-0.5">
+                  {returnedSubreddits.map((sub) => (
+                    <button
+                      key={sub}
+                      onClick={() => { setSelectedSubFilter(sub); setVisibleCount(9); }}
+                      className={`w-full text-left px-3 py-2 rounded text-xs font-semibold transition-colors cursor-pointer ${
+                        selectedSubFilter === sub
+                          ? "bg-[#2ea44f] text-[#0d1117]"
+                          : "text-[#8b949e] hover:text-white hover:bg-[#30363d]"
+                      }`}
+                    >
+                      r/{sub}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        </aside>
+      </div>
 
       {/* Main Container Wrapper */}
       <main className="flex-grow max-w-7xl w-full mx-auto p-4 sm:p-6 lg:p-8 flex flex-col gap-6">
