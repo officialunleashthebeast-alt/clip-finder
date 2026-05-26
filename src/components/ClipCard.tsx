@@ -47,22 +47,49 @@ export default function ClipCard({ clip, index, isPlaying, onPlay, onPause }: Cl
   };
 
   // Safe client-side proxy file download
-  const handleDownload = async (    e: MouseEvent) => {
+  const handleDownload = async (e: MouseEvent) => {
     e.preventDefault();
     try {
       setDownloadState("fetching");
       const dashParam = clip.dashUrl ? `&dashUrl=${encodeURIComponent(clip.dashUrl)}` : "";
       const downloadUrl = `/api/download?url=${encodeURIComponent(clip.videoUrl)}&title=${encodeURIComponent(clip.title)}${dashParam}`;
       
-      // Trigger standard browser native download pipeline directly
+      // Use fetch to download the file properly, then trigger download
+      const response = await fetch(downloadUrl);
+      
+      if (!response.ok) {
+        throw new Error(`Server returned ${response.status}: ${response.statusText}`);
+      }
+      
+      // Get the content as a blob
+      const blob = await response.blob();
+      
+      // Create a temporary URL for the blob
+      const blobUrl = URL.createObjectURL(blob);
+      
+      // Create a proper download link
       const helperLink = document.createElement("a");
-      helperLink.href = downloadUrl;
-      helperLink.setAttribute("download", "");
+      helperLink.href = blobUrl;
+      
+      // Extract filename from Content-Disposition header or build one
+      const contentDisposition = response.headers.get("Content-Disposition");
+      let filename = `${clip.title.replace(/[^a-zA-Z0-9\s]/g, '').substring(0, 50) || 'video'}.mp4`;
+      if (contentDisposition) {
+        const filenameMatch = contentDisposition.match(/filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/);
+        if (filenameMatch && filenameMatch[1]) {
+          filename = filenameMatch[1].replace(/['"]/g, '');
+        }
+      }
+      
+      helperLink.setAttribute("download", filename);
+      helperLink.style.display = "none";
       document.body.appendChild(helperLink);
       helperLink.click();
       document.body.removeChild(helperLink);
-
-      // Momentarily show success/active state
+      
+      // Clean up the blob URL after a short delay
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+      
       setDownloadState("idle");
     } catch (err) {
       console.error(`[DOWNLOAD ACTION FAILURE] ${err}`);

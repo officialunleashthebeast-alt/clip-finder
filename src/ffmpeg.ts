@@ -666,8 +666,15 @@ export async function muxVideoForDownload(videoInputPath: string, outputPath: st
     args.push("-vf", filterParts.join(","));
   }
 
-  // Audio handling: mix with voiceover/music if provided
-  if (opts.voiceover?.sourcePath) {
+  // Handle separate audio input (Reddit videos often have separate audio)
+  if (opts.audioInputPath) {
+    args.push("-i", opts.audioInputPath);
+    // Video is input 0, audio is input 1 - use [1:a] for audio since video has no audio
+    const amix = "[1:a]anull[audio]";
+    args.push("-filter_complex", amix);
+    args.push("-map", "[audio]");
+    audioLabel = "";
+  } else if (opts.voiceover?.sourcePath) {
     const vol = opts.voiceover.volume ?? 1.0;
     args.push("-i", opts.voiceover.sourcePath);
     const offsetMs = opts.voiceover.offset ? (opts.voiceover.offset * 1000).toFixed(0) : "0";
@@ -691,8 +698,9 @@ export async function muxVideoForDownload(videoInputPath: string, outputPath: st
     "-map", videoLabel,
   );
 
+  // Use optional audio map (?) to handle videos without audio streams
   if (audioLabel) {
-    args.push("-map", audioLabel);
+    args.push("-map", audioLabel + "?");
   }
 
   args.push(
