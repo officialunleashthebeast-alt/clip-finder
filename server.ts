@@ -6,15 +6,31 @@ import { finished } from "stream/promises";
 import { promises as fs, createReadStream, createWriteStream } from "fs";
 import os from "os";
 import crypto from "crypto";
-import { muxVideoForDownload, QUALITY_PRESETS } from "./src/ffmpeg.ts";
+import { spawn } from "child_process";
+import { muxVideoForDownload, spawnMuxToStream, spawnMuxToStreamFromUrls, QUALITY_PRESETS } from "./src/ffmpeg.ts";
 const REDDIT_NAME = process.env.REDDIT_APP_NAME || "MyRedditVidsScraper";
 const POSTS_PER_SUBREDDIT = 10;
-const SCRAPE_TIMEOUT_MS = 3500;
+// Per-strategy timeouts. Direct Reddit is fast; the public proxies need more headroom.
+const TIMEOUT_DIRECT_MS = 5000;
+const TIMEOUT_ALLORIGINS_MS = 9000;
+const TIMEOUT_REDLIB_MS = 7000;
+// Cap parallel subreddit fetches so Reddit doesn't 429 the whole burst.
+const MAX_PARALLEL_SUBREDDITS = 4;
+// Small jitter (ms) before each subreddit kicks off, to de-sync the herd.
+const SUBREDDIT_STAGGER_MAX_MS = 350;
 const HOT_BATCH_SIZE = 25;
 const MAX_HOT_SCAN_POSTS = 100;
 const SOURCE_BLEND = [
   { sort: "hot", limit: HOT_BATCH_SIZE, time: "" }
 ] as const;
+// Multiple Redlib mirrors — pick one at random per request so a single rate-limited
+// host doesn't kill every fallback.
+const REDLIB_MIRRORS = [
+  "https://redlib.catsarch.com",
+  "https://redlib.kittenswithcrowns.xyz",
+  "https://safereddit.com",
+  "https://redlib.privacydev.net"
+];
 const TARGET_SUBREDDITS = [
   "CrazyFuckingVideos",
   "PublicFreakout",
@@ -48,8 +64,10 @@ async function startServer() {
   // 1. Core Scrape API
   app.get("/api/scrape", async (req, res) => {
     console.log("[BACKEND] GET /api/scrape endpoint triggered.");
-    const results = await Promise.all(
-      TARGET_SUBREDDITS.map(async (subreddit) => fetchSubredditResult(subreddit))
+    const results = await runWithConcurrency(
+      TARGET_SUBREDDITS,
+      MAX_PARALLEL_SUBREDDITS,
+      async (subreddit) => fetchSubredditResult(subreddit)
     );
 
     const allClips = results.flatMap((result) => result.clips);
@@ -147,6 +165,12 @@ async function startServer() {
   });
 
   // 3. Download Proxy Route
+  // Strategy (best quality + fastest path):
+  //   1. Resolve a DASH manifest URL (use provided dashUrl, else derive from v.redd.it videoUrl).
+  //   2. Parse the manifest, pick the highest-resolution video Representation + highest-bitrate audio.
+  //   3. Hand those URLs DIRECTLY to FFmpeg (no disk staging) and stream-copy to the response.
+  //      → No re-encode (instant) + no quality loss (lossless mux) + parallel HTTP fetch in FFmpeg.
+  //   4. Fall back to fallback_url + probed audio only if every DASH attempt fails.
   app.get("/api/download", async (req, res) => {
     const videoUrl = req.query.url as string;
     const requestedTitle = typeof req.query.title === "string" ? req.query.title : "";
@@ -157,80 +181,89 @@ async function startServer() {
 
     console.log(`[BACKEND DOWNLOAD] Processing stream pipe target: ${videoUrl}`);
     const title = sanitizeMetadataValue(requestedTitle) || "Untitled Viral Moment";
-    const tempDir = path.join(os.tmpdir(), `reddit-scraper-${crypto.randomUUID()}`);
+    const filename = buildDownloadFilename(title);
+
+    let ffmpegProc: import("child_process").ChildProcess | null = null;
+    let tempDir: string | null = null;
 
     try {
-      await fs.mkdir(tempDir, { recursive: true });
+      // ---------- FAST PATH: DASH-direct, highest quality ----------
+      // If frontend didn't pass dashUrl, derive it for v.redd.it videos.
+      const dashUrlCandidate = requestedDashUrl || deriveDashUrlFromVideoUrl(videoUrl);
 
-      const videoInputPath = path.join(tempDir, "video.mp4");
-      const audioInputPath = path.join(tempDir, "audio.mp4");
-      const outputPath = path.join(tempDir, "output.mp4");
-
-      let muxedWithDashManifest = false;
-      if (requestedDashUrl) {
+      if (dashUrlCandidate) {
         try {
-          const dashStreams = await resolveHighestQualityDashStreams(requestedDashUrl);
+          const dashStreams = await resolveHighestQualityDashStreams(dashUrlCandidate);
           if (dashStreams.videoUrl) {
-            await downloadRemoteFile(dashStreams.videoUrl, videoInputPath);
-
-            if (dashStreams.audioUrl) {
-              await downloadRemoteFile(dashStreams.audioUrl, audioInputPath);
-            }
-
-            await muxVideoForDownload(videoInputPath, outputPath, {
-              audioInputPath: dashStreams.audioUrl ? audioInputPath : null,
-              title,
-              quality: QUALITY_PRESETS.high,
-            });
-            muxedWithDashManifest = true;
+            console.log(
+              `[BACKEND DOWNLOAD] DASH best-quality picked: video=${shortUrl(dashStreams.videoUrl)} audio=${dashStreams.audioUrl ? shortUrl(dashStreams.audioUrl) : "none"}`
+            );
+            ffmpegProc = spawnMuxToStreamFromUrls(
+              dashStreams.videoUrl,
+              dashStreams.audioUrl || null,
+              title
+            );
+          } else {
+            console.warn(
+              `[BACKEND DOWNLOAD] DASH manifest had no video representations, falling back to fallback_url.`
+            );
           }
         } catch (err: any) {
-          console.warn(`[BACKEND DOWNLOAD] Dash manifest mux failed, falling back to direct media download: ${err?.message || String(err)}`);
+          console.warn(
+            `[BACKEND DOWNLOAD] DASH path failed (${err?.message || String(err)}), falling back to fallback_url.`
+          );
         }
       }
 
-      if (!muxedWithDashManifest) {
-        await downloadRemoteFile(videoUrl, videoInputPath);
-
+      // ---------- SLOW PATH: fallback_url + probed audio ----------
+      // Only runs when DASH resolution failed entirely. We still pipe URLs directly
+      // to FFmpeg here too — no disk staging — to keep things fast.
+      if (!ffmpegProc) {
         const audioUrl = await findMatchingAudioUrl(videoUrl);
-        const hasSeparateAudio = Boolean(audioUrl);
         if (audioUrl) {
-          await downloadRemoteFile(audioUrl, audioInputPath);
+          console.log(`[BACKEND DOWNLOAD] Fallback path with separate audio: ${shortUrl(audioUrl)}`);
         }
-
-        await muxVideoForDownload(videoInputPath, outputPath, {
-          audioInputPath: hasSeparateAudio ? audioInputPath : null,
-          title,
-          quality: QUALITY_PRESETS.high,
-        });
+        ffmpegProc = spawnMuxToStreamFromUrls(videoUrl, audioUrl, title);
       }
-
-      const filename = buildDownloadFilename(title);
-      const outputStats = await fs.stat(outputPath);
 
       res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
       res.setHeader("Content-Type", "video/mp4");
-      res.setHeader("Content-Length", String(outputStats.size));
-
-      const stream = createReadStream(outputPath);
 
       req.on("close", () => {
-        stream.destroy();
+        if (ffmpegProc && !ffmpegProc.killed) {
+          ffmpegProc.kill();
+        }
       });
 
-      res.on("finish", async () => {
-        await cleanupDirectory(tempDir);
+      // Pipe FFmpeg stdout directly to the HTTP response (zero buffering)
+      ffmpegProc!.stdout!.pipe(res);
+
+      let stderrBuf = "";
+      ffmpegProc!.stderr?.on("data", (chunk: Buffer) => {
+        stderrBuf += chunk.toString();
       });
 
-      res.on("close", async () => {
-        await cleanupDirectory(tempDir);
+      ffmpegProc!.on("close", (code) => {
+        if (code === 0) {
+          console.log(`[BACKEND DOWNLOAD] Streamed: ${filename}`);
+        } else {
+          console.error(`[BACKEND DOWNLOAD] FFmpeg exit ${code}: ${stderrBuf.slice(-300)}`);
+          if (!res.headersSent) {
+            res.status(500).send("Download failed");
+          }
+        }
       });
 
-      stream.pipe(res);
-      console.log(`[BACKEND DOWNLOAD] download success: successfully downloaded and streamed video: ${filename}`);
+      ffmpegProc!.on("error", (err) => {
+        console.error(`[BACKEND DOWNLOAD] FFmpeg error: ${err.message}`);
+        if (!res.headersSent) {
+          res.status(500).send("Download failed");
+        }
+      });
+
     } catch (err: any) {
       console.error(`[BACKEND DOWNLOAD FAILURE] suffers exception: ${err?.message || String(err)}`);
-      await cleanupDirectory(tempDir);
+      if (tempDir) await cleanupDirectory(tempDir);
       if (!res.headersSent) {
         res.status(500).send("Download failed");
       }
@@ -392,17 +425,20 @@ async function fetchListingForSource(
       {
         name: "Direct Reddit",
         url: directUrl,
-        unpackWrappedJson: false
+        unpackWrappedJson: false,
+        timeoutMs: TIMEOUT_DIRECT_MS
       },
       {
         name: "AllOrigins",
         url: `https://api.allorigins.win/get?url=${encodeURIComponent(directUrl)}`,
-        unpackWrappedJson: true
+        unpackWrappedJson: true,
+        timeoutMs: TIMEOUT_ALLORIGINS_MS
       },
       {
         name: "Redlib",
         url: buildRedlibListingUrl(subreddit, sort, limit, time, after),
-        unpackWrappedJson: false
+        unpackWrappedJson: false,
+        timeoutMs: TIMEOUT_REDLIB_MS
       }
     ];
 
@@ -411,7 +447,7 @@ async function fetchListingForSource(
 
     for (const strategy of strategies) {
       try {
-        const payload = await fetchJsonPayload(strategy.url, strategy.unpackWrappedJson);
+        const payload = await fetchJsonPayload(strategy.url, strategy.unpackWrappedJson, strategy.timeoutMs);
         pageChildren = Array.isArray(payload?.data?.children) ? payload.data.children : [];
         nextAfter = typeof payload?.data?.after === "string" ? payload.data.after : "";
         if (pageChildren.length > 0) {
@@ -478,21 +514,28 @@ function buildRedlibListingUrl(subreddit: string, sort: string, limit: number, t
     params.set("after", after);
   }
 
-  return `https://redlib.catsarch.com/r/${subreddit}/${sort}.json?${params.toString()}`;
+  const mirror = REDLIB_MIRRORS[Math.floor(Math.random() * REDLIB_MIRRORS.length)];
+  return `${mirror}/r/${subreddit}/${sort}.json?${params.toString()}`;
 }
 
-async function fetchJsonPayload(url: string, unpackWrappedJson: boolean) {
+async function fetchJsonPayload(url: string, unpackWrappedJson: boolean, timeoutMs: number) {
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), SCRAPE_TIMEOUT_MS);
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
     const response = await fetch(url, {
       headers: {
         ...getStandardFetchHeaders(),
-        "User-Agent": `${REDDIT_NAME}/1.0`
+        // Reddit's API recommendation: <platform>:<app-id>:<version> (by /u/<reddit-username>)
+        "User-Agent": `node:${REDDIT_NAME}:1.0 (by /u/scraper_bot)`
       },
       signal: controller.signal
     });
+
+    if (response.status === 429) {
+      // Surface rate-limit distinctly so the caller can fall through to the next strategy fast.
+      throw new Error(`Endpoint returned HTTP 429`);
+    }
 
     if (!response.ok) {
       throw new Error(`Endpoint returned HTTP ${response.status}`);
@@ -525,6 +568,36 @@ function dedupeClips(clips: any[]) {
     seen.add(key);
     return true;
   });
+}
+
+/**
+ * Run an async mapper over `items` with at most `limit` workers in flight at once.
+ * Adds a small random stagger before each task starts so we don't slam Reddit with
+ * a synchronized burst (which is what was triggering the 429 cascade).
+ */
+async function runWithConcurrency<T, R>(
+  items: readonly T[],
+  limit: number,
+  mapper: (item: T, index: number) => Promise<R>
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let cursor = 0;
+
+  const worker = async () => {
+    while (true) {
+      const index = cursor++;
+      if (index >= items.length) return;
+      // Per-task jitter to de-sync requests sharing the same outbound IP.
+      await new Promise((resolve) =>
+        setTimeout(resolve, Math.random() * SUBREDDIT_STAGGER_MAX_MS)
+      );
+      results[index] = await mapper(items[index], index);
+    }
+  };
+
+  const workerCount = Math.min(Math.max(1, limit), items.length);
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+  return results;
 }
 
 function isLikelyPlayableVideoUrl(videoUrl: string) {
@@ -569,6 +642,32 @@ function buildDownloadFilename(title: string) {
   return `${safe || "reddit-clip"}.mp4`;
 }
 
+function shortUrl(url: string) {
+  return url.length > 80 ? `${url.slice(0, 80)}...` : url;
+}
+
+/**
+ * Derive a DASH manifest URL from a v.redd.it fallback video URL when the
+ * frontend didn't pass dashUrl explicitly. Reddit serves DASHPlaylist.mpd at
+ * the same base path, e.g.:
+ *   https://v.redd.it/abc123/DASH_720.mp4 -> https://v.redd.it/abc123/DASHPlaylist.mpd
+ * Returns "" when the URL isn't a v.redd.it asset (nothing to derive).
+ */
+function deriveDashUrlFromVideoUrl(videoUrl: string) {
+  try {
+    const parsed = new URL(videoUrl);
+    if (parsed.hostname !== "v.redd.it") return "";
+    const parts = parsed.pathname.split("/").filter(Boolean);
+    if (parts.length < 2) return "";
+    parts[parts.length - 1] = "DASHPlaylist.mpd";
+    parsed.pathname = `/${parts.join("/")}`;
+    parsed.search = "";
+    return parsed.toString();
+  } catch {
+    return "";
+  }
+}
+
 async function cleanupDirectory(targetDir: string) {
   try {
     await fs.rm(targetDir, { recursive: true, force: true });
@@ -585,7 +684,7 @@ function getStandardFetchHeaders() {
 
 async function downloadRemoteFile(sourceUrl: string, outputPath: string) {
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 35000);
+  const timeoutId = setTimeout(() => controller.abort(), 120000);
 
   try {
     const response = await fetch(sourceUrl, {
@@ -661,9 +760,16 @@ async function findMatchingAudioUrl(videoUrl: string) {
     return candidate.toString();
   });
 
-  for (const candidate of candidates) {
-    if (await probeRemoteFile(candidate)) {
-      return candidate;
+  // Probe all candidates in parallel for speed
+  const results = await Promise.allSettled(
+    candidates.map(async (candidate) => {
+      const exists = await probeRemoteFile(candidate);
+      return exists ? candidate : null;
+    })
+  );
+  for (const result of results) {
+    if (result.status === "fulfilled" && result.value) {
+      return result.value;
     }
   }
 

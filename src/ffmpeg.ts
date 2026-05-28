@@ -1,4 +1,4 @@
-import { execFile, execFileSync } from "child_process";
+import { execFile, execFileSync, spawn } from "child_process";
 import { promises as fs, createWriteStream } from "fs";
 import { Readable } from "stream";
 import { finished } from "stream/promises";
@@ -639,7 +639,6 @@ export async function muxVideoForDownload(videoInputPath: string, outputPath: st
   const filterParts: string[] = [];
   let videoLabel = "0:v:0";
   let audioLabel = "0:a:0";
-  let hasComplexFilter = false;
 
   if (opts.resolution) {
     filterParts.push(`scale=${opts.resolution.width}:${opts.resolution.height}:flags=lanczos,setsar=1:1`);
@@ -662,6 +661,10 @@ export async function muxVideoForDownload(videoInputPath: string, outputPath: st
     }
   }
 
+  // Determine if we NEED re-encoding (filters, mixing) or can use fast stream copy
+  const needsVideoEncode = filterParts.length > 0 || opts.resolution;
+  const needsAudioEncode = !!(opts.voiceover?.sourcePath || opts.backgroundMusic?.sourcePath);
+
   if (filterParts.length > 0) {
     args.push("-vf", filterParts.join(","));
   }
@@ -669,10 +672,9 @@ export async function muxVideoForDownload(videoInputPath: string, outputPath: st
   // Handle separate audio input (Reddit videos often have separate audio)
   if (opts.audioInputPath) {
     args.push("-i", opts.audioInputPath);
-    // Video is input 0, audio is input 1 - use [1:a] for audio since video has no audio
-    const amix = "[1:a]anull[audio]";
-    args.push("-filter_complex", amix);
-    args.push("-map", "[audio]");
+    // Audio is input 1 - stream copy it (instant, no quality loss)
+    args.push("-map", "1:a:0");
+    args.push("-c:a", "copy");
     audioLabel = "";
   } else if (opts.voiceover?.sourcePath) {
     const vol = opts.voiceover.volume ?? 1.0;
@@ -694,20 +696,31 @@ export async function muxVideoForDownload(videoInputPath: string, outputPath: st
     audioLabel = "";
   }
 
-  args.push(
-    "-map", videoLabel,
-  );
+  args.push("-map", videoLabel);
 
-  // Use optional audio map (?) to handle videos without audio streams
+  // Optional audio map for videos that may lack audio
   if (audioLabel) {
     args.push("-map", audioLabel + "?");
   }
 
-  args.push(
-    ...buildCodecArgs(quality.codec, quality.crf, quality.preset, quality.tune, quality.profile),
-    "-c:a", "aac", "-b:a", "192k",
-    ...buildEncoderFlags(quality.codec),
-  );
+  // --- FAST PATH: stream copy (instant, original quality preserved) ---
+  if (!needsVideoEncode && !needsAudioEncode) {
+    args.push("-c:v", "copy");
+    if (!opts.audioInputPath) {
+      // Only set audio codec if not already handled above
+      args.push("-c:a", "copy");
+    }
+    args.push("-movflags", "+faststart");
+  } else {
+    // --- SLOW PATH: re-encode (only when filters/transforms needed) ---
+    args.push(
+      ...buildCodecArgs(quality.codec, quality.crf, quality.preset, quality.tune, quality.profile),
+      ...buildEncoderFlags(quality.codec),
+    );
+    if (!opts.audioInputPath) {
+      args.push("-c:a", "aac", "-b:a", "192k");
+    }
+  }
 
   if (opts.title) {
     args.push("-metadata", `title=${opts.title}`);
@@ -821,6 +834,140 @@ export async function downloadAndProcess(options: DownloadOptions): Promise<stri
 // ============================================================
 // Helpers
 // ============================================================
+
+// ============================================================
+// Streaming mux - pipes FFmpeg stdout directly to response
+// ============================================================
+
+/**
+ * Mux video + audio via FFmpeg and pipe output to stdout.
+ * Returns the FFmpeg child process. Pipe .stdout to your HTTP response.
+ * Cleans up temp files automatically when done.
+ */
+export function spawnMuxToStream(
+  videoInputPath: string,
+  audioInputPath: string | null | undefined,
+  tempDir: string,
+  title?: string
+): import("child_process").ChildProcess {
+  const args: string[] = ["-y", "-i", videoInputPath];
+
+  if (audioInputPath) {
+    args.push("-i", audioInputPath);
+    args.push("-map", "0:v:0");
+    args.push("-map", "1:a:0");
+  } else {
+    args.push("-map", "0:v:0");
+    args.push("-map", "0:a:0?");
+  }
+
+  // Fast stream copy (no re-encode, instant)
+  args.push("-c:v", "copy");
+  args.push("-c:a", "copy");
+
+  if (title) {
+    args.push("-metadata", `title=${title}`);
+  }
+
+  // Output fragmented MP4 to stdout (fMP4 supports non-seekable pipe output)
+  args.push("-movflags", "frag_keyframe+empty_moov", "-f", "mp4", "pipe:1");
+
+  const proc = spawn("ffmpeg", args, {
+    windowsHide: true,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+
+  let stderrBuf = "";
+  proc.stderr?.on("data", (chunk: Buffer) => {
+    stderrBuf += chunk.toString();
+  });
+
+  proc.on("close", (code) => {
+    if (code === 0) {
+      console.log(`[FFMPEG] Stream mux complete`);
+    } else {
+      console.error(`[FFMPEG] Stream mux failed (exit ${code}): ${stderrBuf.slice(-200)}`);
+    }
+    // Cleanup temp directory
+    try { fs.rm(tempDir, { recursive: true, force: true }); } catch {}
+  });
+
+  return proc;
+}
+
+/**
+ * Fastest, highest-quality path for Reddit downloads.
+ *
+ * Feeds the chosen DASH video + audio Representation URLs **directly** to FFmpeg
+ * (no disk staging). FFmpeg fetches both in parallel via its built-in HTTP layer,
+ * stream-copies them (no re-encode → instant + lossless), and emits a fragmented
+ * MP4 to stdout so we can pipe to the HTTP response as bytes arrive.
+ *
+ * - Uses Reddit-friendly headers so v.redd.it doesn't reject the fetch.
+ * - Enables HTTP reconnect to survive transient network blips mid-download.
+ * - Stream-copy means the user gets the EXACT bitrate/resolution Reddit served
+ *   in the manifest (typically the source 1080p/720p), not the lower fallback_url.
+ */
+export function spawnMuxToStreamFromUrls(
+  videoUrl: string,
+  audioUrl: string | null | undefined,
+  title?: string
+): import("child_process").ChildProcess {
+  const headers =
+    "Referer: https://www.reddit.com/\r\nAccept-Language: en-US,en;q=0.9\r\n";
+  const userAgent =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+
+  const inputFlags = (url: string) => [
+    "-user_agent", userAgent,
+    "-headers", headers,
+    "-reconnect", "1",
+    "-reconnect_streamed", "1",
+    "-reconnect_delay_max", "5",
+    "-i", url,
+  ];
+
+  const args: string[] = ["-y", ...inputFlags(videoUrl)];
+
+  if (audioUrl) {
+    args.push(...inputFlags(audioUrl));
+    args.push("-map", "0:v:0", "-map", "1:a:0");
+  } else {
+    args.push("-map", "0:v:0", "-map", "0:a:0?");
+  }
+
+  // Stream copy: zero re-encode, source quality preserved end-to-end.
+  args.push("-c:v", "copy", "-c:a", "copy");
+
+  if (title) {
+    args.push("-metadata", `title=${title}`);
+  }
+
+  // Fragmented MP4 so we can pipe over a non-seekable stdout.
+  args.push("-movflags", "frag_keyframe+empty_moov", "-f", "mp4", "pipe:1");
+
+  const proc = spawn("ffmpeg", args, {
+    windowsHide: true,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+
+  let stderrBuf = "";
+  proc.stderr?.on("data", (chunk: Buffer) => {
+    stderrBuf += chunk.toString();
+  });
+
+  proc.on("close", (code) => {
+    if (code === 0) {
+      console.log(`[FFMPEG] Direct-URL stream mux complete`);
+    } else {
+      console.error(
+        `[FFMPEG] Direct-URL stream mux failed (exit ${code}): ${stderrBuf.slice(-300)}`
+      );
+    }
+  });
+
+  return proc;
+}
 
 function parseDurationFromOutput(stderr: string): number {
   const match = stderr.match(/time=(\d+):(\d+):(\d+\.\d+)/);
